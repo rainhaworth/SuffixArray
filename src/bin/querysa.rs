@@ -11,6 +11,8 @@ use rkyv::Deserialize;
 
 use bisection::bisect_left_slice_by;
 
+use std::time::Instant;
+
 // from Rust docs:
 // The output is wrapped in a Result to allow matching on errors
 // Returns an Iterator to the Reader of the lines of the file.
@@ -74,6 +76,8 @@ fn runquery(deserealized: &Outfile, mode: bool, queryname: String, queryseq: &St
     let mut slice = (0usize, deserealized.0.len());
     let k_usz = usize::try_from(deserealized.2).unwrap();
 
+    let now = Instant::now();
+
     // naive mode
     if mode == false {
         // if using prefix table, get slice to search
@@ -109,6 +113,9 @@ fn runquery(deserealized: &Outfile, mode: bool, queryname: String, queryseq: &St
 
     // add newline
     outstr.push('\n');
+
+    let elapsed = now.elapsed();
+    println!("{} query runtime: {} ms", &queryname, elapsed.as_millis());
 
     // return
     return outstr;
@@ -148,15 +155,13 @@ fn querysa(index: &Path, queries: &Path, mode: bool, output: String){
             if let Ok(ip) = line {
                 // get name from header
                 if ip.chars().nth(0).unwrap() == '>' {
-                    // if we have a query string, handle it
-                    // i just noticed we also need to run this at EOF, maybe make it a function
+                    // if we have a query sequence, handle it
                     if !queryseq.is_empty() {
                         outstr.push_str(&runquery(&deserealized, mode, queryname, &queryseq));
                     }
 
                     // update query name
                     queryname = ip[1..].to_string();
-
                 }
                 // if non header line, get query sequence
                 else if queryseq.is_empty() {
@@ -166,6 +171,10 @@ fn querysa(index: &Path, queries: &Path, mode: bool, output: String){
                     queryseq.push_str(&ip); // this is probably suboptimal b/c of reallocation
                 }
             }
+        }
+        // handle last query sequence
+        if !queryseq.is_empty() {
+            outstr.push_str(&runquery(&deserealized, mode, queryname, &queryseq));
         }
     }
 

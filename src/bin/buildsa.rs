@@ -8,6 +8,8 @@ use std::collections::HashMap;
 
 use rkyv;
 
+use std::time::Instant;
+
 // from Rust docs:
 // The output is wrapped in a Result to allow matching on errors
 // Returns an Iterator to the Reader of the lines of the file.
@@ -144,8 +146,11 @@ fn main() {
             break;
         }
     }
-
+    let now = Instant::now();
     // make path from string, run function
     let reference = Path::new(&reference_str);
     buildsa(reference, output, k);
+
+    let elapsed = now.elapsed();
+    println!("runtime: {} ms", elapsed.as_millis());
 }
