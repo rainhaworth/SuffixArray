@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use rkyv;
 use rkyv::Deserialize;
 
+use bisection::bisect_left_slice_by;
+
 // from Rust docs:
 // The output is wrapped in a Result to allow matching on errors
 // Returns an Iterator to the Reader of the lines of the file.
@@ -18,11 +20,101 @@ where P: AsRef<Path>, {
     Ok(io::BufReader::new(file).lines())
 }
 
+// generate the smallest string that is lexicographically larger
+// using alphabet ACGT
+fn nextseq(queryseq: &String) -> String {
+    let mut outstringvec = queryseq.chars().collect::<Vec<char>>();
+
+    // define bidirectional map
+    let idxtochar: HashMap<usize,char> = HashMap::from([
+        (0, 'A'),
+        (1, 'C'),
+        (2, 'G'),
+        (3, 'T')
+    ]);
+    let chartoidx: HashMap<char,usize> = HashMap::from([
+        ('A', 0),
+        ('C', 1),
+        ('G', 2),
+        ('T', 3)
+    ]);
+
+    // get string
+    for i in 1..queryseq.len() {
+        //iterate backwards
+        let idx = queryseq.len() - i;
+        let cti = chartoidx.get(&outstringvec[idx]).unwrap();
+        // if this char isn't T, increment and exit loop
+        if *cti < 3 {
+            outstringvec[idx] = *idxtochar.get(&(*cti+1)).unwrap();
+            break;
+        }
+        // if it's T, set to A and move to next char
+        else {
+            outstringvec[idx] = 'A';
+            // if we're at the last char, push an A; doesn't matter where b/c the whole string is As
+            if idx == 0 {
+                outstringvec.push('A');
+            }
+        }
+    }
+
+    // return output string
+    return outstringvec.into_iter().collect::<String>();
+}
+
 // define type alias so this is less awful to look at
 type Outfile = (Vec<(usize, Vec<char>)>, HashMap<String, (usize,usize)>, u32);
 
-// gonna just write this here for now or i have to stop using cargo i think
-// given 
+// actual query handler function
+// not sure if this borrowing shit is gonna ruin my life but i'll find out i guess
+fn runquery(deserealized: &Outfile, mode: bool, queryname: String, queryseq: &String) -> String {
+    let mut outstr = String::new();
+    let mut hitrange = (0usize, 0usize);
+    let mut slice = (0usize, deserealized.0.len());
+    let k_usz = usize::try_from(deserealized.2).unwrap();
+
+    // naive mode
+    if mode == false {
+        // if using prefix table, get slice to search
+        if k_usz > 0 {
+            let prefix = queryseq.chars().take(k_usz).collect::<String>();
+            slice = deserealized.1.get(&prefix).unwrap().clone();
+        }
+
+        // bisect_left to find start of range
+        let start = bisect_left_slice_by(&deserealized.0, slice.0..slice.1,
+            |(_a,b)| b.get(0..queryseq.len())
+            .unwrap().iter().collect::<String>().cmp(&queryseq));
+        
+        // get next sequence in lexicographical order and use to find end of range
+        let ns = nextseq(queryseq);
+        let end = bisect_left_slice_by(&deserealized.0, slice.0..slice.1,
+            |(_a,b)| b.get(0..ns.len())
+            .unwrap().iter().collect::<String>().cmp(&ns));
+
+        // save hit range
+        hitrange = (start, end);
+    }
+    
+    // add query name, number of hits to outstr
+    outstr.push_str(format!("{}\t{}", queryname, hitrange.1 - hitrange.0).as_str());
+
+    // add list of hits
+    for hit in hitrange.0..hitrange.1 {
+        // extract index from suffix array
+        let idx = deserealized.0[hit].0;
+        outstr.push_str(format!("\t{}", idx).as_str());
+    }
+
+    // add newline
+    outstr.push('\n');
+
+    // return
+    return outstr;
+}
+
+// given suffix array path, query sequence path, mode, and output name, query suffix array
 fn querysa(index: &Path, queries: &Path, mode: bool, output: String){
     // mode: 0 = naive, 1 = simpaccel
 
@@ -44,14 +136,12 @@ fn querysa(index: &Path, queries: &Path, mode: bool, output: String){
 
     // deserealized.0 --> suffix array
     // deserealized.1 --> prefix table
-    let k_usz = usize::try_from(deserealized.2).unwrap();
-
+    // deserealized.2 --> k
+    
     // load queries file using read_lines iterator
     let mut outstr = String::new();
     let mut queryname = String::new();
     let mut queryseq = String::new();
-    let mut hits: Vec<usize> = Vec::new();
-    let mut slice = (0usize, deserealized.0.len());
     if let Ok(lines) = read_lines(queries) {
         // Consumes the iterator, returns an (Optional) String
         for line in lines {
@@ -59,73 +149,9 @@ fn querysa(index: &Path, queries: &Path, mode: bool, output: String){
                 // get name from header
                 if ip.chars().nth(0).unwrap() == '>' {
                     // if we have a query string, handle it
+                    // i just noticed we also need to run this at EOF, maybe make it a function
                     if !queryseq.is_empty() {
-                        // naive mode
-                        if mode == false {
-                            // if using prefix table, get slice to search
-                            if k_usz > 0 {
-                                let prefix = queryseq.chars().take(k_usz).collect::<String>();
-                                slice = deserealized.1.get(&prefix).unwrap().clone();
-                            }
-
-                            // search entire suffix array
-                            // this is a complete mess but basically,
-                                // 1. get a slice of the suffix array
-                                // 2. extract a chunk of the string to compare to the query sequence
-                                // 3. binary search
-                                // 4. if we find a hit, traverse the suffix array to find all the others
-                            let search = deserealized.0[slice.0..slice.1].binary_search_by
-                                (|(_a,b)| b.get(0..queryseq.len())
-                                .unwrap().iter().collect::<String>().cmp(&queryseq));
-
-                            match search {
-                                Ok(i) => hits.push(i),
-                                Err(_e) => ()
-                            }
-
-                            if !hits.is_empty() {
-                                let hit_idx = hits.last().unwrap().clone();
-                                let mut i = hit_idx;
-                                let mut direction = true;
-                                // look forward (true) then backward (false)
-                                loop {
-                                    if direction == true {
-                                        i += 1;
-                                    } else {
-                                        i -= 1;
-                                    }
-
-                                    if deserealized.0[i].1.starts_with(&queryseq.chars().collect::<Vec<char>>()) {
-                                        hits.push(i);
-                                    } else if direction == true {
-                                        direction = false;
-                                        i = hit_idx;
-                                    } else {
-                                        break;
-                                    }
-                                }
-                            }
-
-                            // reset query sequence and search slice
-                            slice = (0usize, deserealized.0.len());
-                            queryseq.clear();
-                        }
-                        
-                        // add query name, number of hits to outstr
-                        outstr.push_str(format!("{}\t{}", queryname, hits.len()).as_str());
-
-                        // add list of hits
-                        for hit in &hits {
-                            // extract index from suffix array
-                            let idx = deserealized.0[*hit].0;
-                            outstr.push_str(format!("\t{}", idx).as_str());
-                        }
-
-                        // add newline
-                        outstr.push('\n');
-
-                        // reset hits
-                        hits.clear();
+                        outstr.push_str(&runquery(&deserealized, mode, queryname, &queryseq));
                     }
 
                     // update query name
