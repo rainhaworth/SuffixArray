@@ -6,9 +6,15 @@ use std::io::{self, BufRead, Write};
 
 use std::collections::HashMap;
 
-use rkyv;
+use bincode;
 
 use std::time::Instant;
+
+/* 
+#[derive(HeapSizeOf)]
+pub struct displaylist {
+    pub suffixarray: Vec<(usize, Vec<char>)>
+}*/
 
 // from Rust docs:
 // The output is wrapped in a Result to allow matching on errors
@@ -19,10 +25,15 @@ where P: AsRef<Path>, {
     Ok(io::BufReader::new(file).lines())
 }
 
+// define type alias so this is less awful to look at
+//type Outfile = (Vec<(usize, Vec<char>)>, HashMap<String, (usize,usize)>, u32);
+
 // given input data, build suffix array, encode, and write to file
 fn buildsa(reference: &Path, output: String, k: u32) {
     // read in FASTA file, store as string (first entry, i.e. until '>'? until EOF?)
     let mut refseq = String::new();
+
+    let now = Instant::now();
 
     // from Rust docs:
     // File hosts must exist in current path before this produces output
@@ -47,23 +58,11 @@ fn buildsa(reference: &Path, output: String, k: u32) {
     //append $
     refseq.push('$');
 
-    // create suffix array
-    // vector where each element is a tuple of (index, suffix), where suffix is a char vector
-    let reflen = refseq.len();
-    let mut suffixvec: Vec<(usize, Vec<char>)> = vec![(0, Vec::with_capacity(reflen)); reflen];
-    
-    // populate
-    let refseqvec: Vec<char> = refseq.chars().collect();
-    for i in 0..reflen {
-        suffixvec[i] = (i, refseqvec[i..reflen].to_vec());
-    }
+    // create suffix (index) array
+    let mut suffixvec: Vec<usize> = (0..refseq.len()).collect();
 
-    /*for i in (reflen-5)..reflen {
-        println!("{}: {}", suffixvec[i].0, suffixvec[i].1.iter().cloned().collect::<String>())
-    }*/
-
-    // sort lexicographically, i.e. only using suffixes
-    suffixvec.sort_unstable_by(|(_a,b), (_c,d)| b.cmp(d));
+    // sort lexicographically using suffixes
+    suffixvec.sort_unstable_by(|a, b| (&refseq[*a..]).cmp(&refseq[*b..]));
 
     // prefix table
     let mut prefmap: HashMap<String, (usize,usize)> = HashMap::new();
@@ -77,18 +76,18 @@ fn buildsa(reference: &Path, output: String, k: u32) {
         for i in 0..suffixvec.len() {
             // skip entries that are too small
             // this might cause weird behavior; if so, handle this and exclude things from the range
-            if suffixvec[i].1.len() < k_usz{
+            if refseq.len() - suffixvec[i] < k_usz{
                 continue;
             }
             // grab prefix slice
-            let prefix_new = suffixvec[i].1.get(0..k_usz).unwrap().iter().collect::<String>();
+            let prefix_new = &refseq[suffixvec[i]..(suffixvec[i]+k_usz)].to_string();
 
             // if different prefix is found, update prefix table
-            if prefix_new != prefix {
+            if *prefix_new != prefix {
                 if !prefix.is_empty() {
                     prefmap.insert(prefix.clone(), (start, i));
                 }
-                prefix = prefix_new;
+                prefix = prefix_new.to_string();
                 start = i;
             }
         }
@@ -96,11 +95,13 @@ fn buildsa(reference: &Path, output: String, k: u32) {
         // add last k-mer; i don't think there's a case where we don't need to do this
         prefmap.insert(prefix.clone(), (start, suffixvec.len()));
     }
-
-    // generate binary encoding w/ rkyv
-    // format: (Vec<(usize, Vec<char>)>, HashMap<String, (usize,usize)>, u32)
-    // i tried making this into a struct but everything broke, so i'm doing this instead
-    let bytes = rkyv::to_bytes::<_, 256>(&(suffixvec, prefmap, k)).unwrap();
+    
+    // encode with bincode
+    let bytes = bincode::serialize(&(refseq, suffixvec, k, prefmap)).unwrap();
+    
+    // log runtime
+    let elapsed = now.elapsed();
+    println!("runtime: {} ms", elapsed.as_millis());
 
     // write to file (from Rust docs)
     let mut file = match File::create(&output) {
@@ -146,11 +147,7 @@ fn main() {
             break;
         }
     }
-    let now = Instant::now();
     // make path from string, run function
     let reference = Path::new(&reference_str);
     buildsa(reference, output, k);
-
-    let elapsed = now.elapsed();
-    println!("runtime: {} ms", elapsed.as_millis());
 }

@@ -3,11 +3,9 @@ use std::env;
 use std::path::Path;
 use std::fs::File;
 use std::io::{self, BufRead, Read, Write};
+use std::cmp;
 
 use std::collections::HashMap;
-
-use rkyv;
-use rkyv::Deserialize;
 
 use bisection::bisect_left_slice_by;
 
@@ -21,6 +19,9 @@ where P: AsRef<Path>, {
     let file = File::open(filename)?;
     Ok(io::BufReader::new(file).lines())
 }
+
+// define type alias so this is less awful to look at
+type Inbytes = (String, Vec<usize>, u32, HashMap<String, (usize,usize)>);
 
 // generate the smallest string that is lexicographically larger
 // using alphabet ACGT
@@ -65,16 +66,13 @@ fn nextseq(queryseq: &String) -> String {
     return outstringvec.into_iter().collect::<String>();
 }
 
-// define type alias so this is less awful to look at
-type Outfile = (Vec<(usize, Vec<char>)>, HashMap<String, (usize,usize)>, u32);
-
 // actual query handler function
 // not sure if this borrowing shit is gonna ruin my life but i'll find out i guess
-fn runquery(deserealized: &Outfile, mode: bool, queryname: String, queryseq: &String) -> String {
+fn runquery(decoded: &Inbytes, mode: bool, queryname: String, queryseq: &String) -> String {
     let mut outstr = String::new();
     let mut hitrange = (0usize, 0usize);
-    let mut slice = (0usize, deserealized.0.len());
-    let k_usz = usize::try_from(deserealized.2).unwrap();
+    let mut slice = (0usize, decoded.1.len());
+    let k_usz = usize::try_from(decoded.2).unwrap();
 
     let now = Instant::now();
 
@@ -83,19 +81,16 @@ fn runquery(deserealized: &Outfile, mode: bool, queryname: String, queryseq: &St
         // if using prefix table, get slice to search
         if k_usz > 0 {
             let prefix = queryseq.chars().take(k_usz).collect::<String>();
-            slice = deserealized.1.get(&prefix).unwrap().clone();
+            slice = decoded.3.get(&prefix).unwrap().clone();
         }
-
         // bisect_left to find start of range
-        let start = bisect_left_slice_by(&deserealized.0, slice.0..slice.1,
-            |(_a,b)| b.get(0..queryseq.len())
-            .unwrap().iter().collect::<String>().cmp(&queryseq));
+        let start = bisect_left_slice_by(&decoded.1, slice.0..slice.1,
+            |a| (&decoded.0)[*a..cmp::min(*a+queryseq.len(), decoded.0.len())].cmp(&queryseq));
         
         // get next sequence in lexicographical order and use to find end of range
         let ns = nextseq(queryseq);
-        let end = bisect_left_slice_by(&deserealized.0, slice.0..slice.1,
-            |(_a,b)| b.get(0..ns.len())
-            .unwrap().iter().collect::<String>().cmp(&ns));
+        let end = bisect_left_slice_by(&decoded.1, slice.0..slice.1,
+            |a| (&decoded.0)[*a..cmp::min(*a+ns.len(), decoded.0.len())].cmp(&ns));
 
         // save hit range
         hitrange = (start, end);
@@ -107,15 +102,14 @@ fn runquery(deserealized: &Outfile, mode: bool, queryname: String, queryseq: &St
     // add list of hits
     for hit in hitrange.0..hitrange.1 {
         // extract index from suffix array
-        let idx = deserealized.0[hit].0;
-        outstr.push_str(format!("\t{}", idx).as_str());
+        outstr.push_str(format!("\t{}", decoded.1[hit]).as_str());
     }
 
     // add newline
     outstr.push('\n');
 
-    let elapsed = now.elapsed();
-    println!("{} query runtime: {} ms", &queryname, elapsed.as_millis());
+    let elapsed_time = now.elapsed();
+    println!("{} query runtime: {:?}", &queryname, elapsed_time);
 
     // return
     return outstr;
@@ -127,7 +121,7 @@ fn querysa(index: &Path, queries: &Path, mode: bool, output: String){
 
     // load suffix array and prefix table from file
     // check if prefix table is empty
-    //return file contents (binary)
+    // return file contents (binary)
     fn read_index_file(filepath: &Path) -> io::Result<Vec<u8>> {
         let mut f = File::open(filepath)?;
         let mut buffer = Vec::new();
@@ -135,15 +129,14 @@ fn querysa(index: &Path, queries: &Path, mode: bool, output: String){
         Ok(buffer)
     }
 
+    // read in bytes and decode with bincode
     let bytes = read_index_file(index).unwrap();
+    let decoded: Inbytes = bincode::deserialize(&bytes).unwrap();
 
-    // get archive and deserialize
-    let deserealized: Outfile = rkyv::check_archived_root::<Outfile>(&bytes[..]).unwrap()
-        .deserialize(&mut rkyv::Infallible).unwrap();
-
-    // deserealized.0 --> suffix array
-    // deserealized.1 --> prefix table
-    // deserealized.2 --> k
+    // decoded.0 --> reference sequence
+    // decoded.1 --> suffix array
+    // decoded.2 --> k
+    // decoded.3 --> prefix table
     
     // load queries file using read_lines iterator
     let mut outstr = String::new();
@@ -157,7 +150,8 @@ fn querysa(index: &Path, queries: &Path, mode: bool, output: String){
                 if ip.chars().nth(0).unwrap() == '>' {
                     // if we have a query sequence, handle it
                     if !queryseq.is_empty() {
-                        outstr.push_str(&runquery(&deserealized, mode, queryname, &queryseq));
+                        outstr.push_str(&runquery(&decoded, mode, queryname, &queryseq));
+                        queryseq.clear();
                     }
 
                     // update query name
@@ -174,7 +168,7 @@ fn querysa(index: &Path, queries: &Path, mode: bool, output: String){
         }
         // handle last query sequence
         if !queryseq.is_empty() {
-            outstr.push_str(&runquery(&deserealized, mode, queryname, &queryseq));
+            outstr.push_str(&runquery(&decoded, mode, queryname, &queryseq));
         }
     }
 
