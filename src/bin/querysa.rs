@@ -76,13 +76,14 @@ fn runquery(decoded: &Inbytes, mode: bool, queryname: String, queryseq: &String)
 
     let now = Instant::now();
 
+    // if using prefix table, get slice to search
+    if k_usz > 0 {
+        let prefix = queryseq.chars().take(k_usz).collect::<String>();
+        slice = decoded.3.get(&prefix).unwrap().clone();
+    }
+
     // naive mode
     if mode == false {
-        // if using prefix table, get slice to search
-        if k_usz > 0 {
-            let prefix = queryseq.chars().take(k_usz).collect::<String>();
-            slice = decoded.3.get(&prefix).unwrap().clone();
-        }
         // bisect_left to find start of range
         let start = bisect_left_slice_by(&decoded.1, slice.0..slice.1,
             |a| (&decoded.0)[*a..cmp::min(*a+queryseq.len(), decoded.0.len())].cmp(&queryseq));
@@ -93,6 +94,62 @@ fn runquery(decoded: &Inbytes, mode: bool, queryname: String, queryseq: &String)
             |a| (&decoded.0)[*a..cmp::min(*a+ns.len(), decoded.0.len())].cmp(&ns));
 
         // save hit range
+        hitrange = (start, end);
+    }
+    // simple accel mode
+    else {
+        fn simpaccel(slice: &(usize,usize), decoded: &Inbytes, queryseq: &String) -> usize {
+            let mut l = slice.0;
+            let mut r = slice.1;
+            // define least common product function
+            fn lcp(a: &String, b: &str, start: usize) -> usize {
+                let maxlcp = cmp::min(a.len(), b.len());
+                for i in start..maxlcp {
+                    if a.chars().nth(i).unwrap() != b.chars().nth(i).unwrap() {
+                        return i;
+                    }
+                }
+                return maxlcp;
+            }
+            let mut lcp_l = lcp(&queryseq, &decoded.0[decoded.1[l]..], 0);
+            let mut lcp_r = 0;
+            if r < decoded.0.len() {
+                lcp_r = lcp(&queryseq, &decoded.0[decoded.1[r]..], 0);
+            }
+            loop {
+                // truncate, which for our purposes is a floor
+                let c = (l + r)/2;
+
+                // lcp_c >= min 
+                let lcp_c = cmp::min(lcp_l, lcp_r);
+
+                // check P vs SA[c]
+                if &queryseq[lcp_c..] < &decoded.0[decoded.1[c]+lcp_c..decoded.1[c]+queryseq.len()] {
+                    if c == l + 1 {
+                        return c;
+                    }
+                    else {
+                        r = c;
+                        lcp_r = lcp(&queryseq, &decoded.0[decoded.1[c]..], lcp_c);
+                    }
+                }
+                else {
+                    if c == r - 1 {
+                        return r;
+                    }
+                    else {
+                        l = c;
+                        lcp_l = lcp(&queryseq, &decoded.0[decoded.1[c]..], lcp_c);
+                    }
+                }
+
+            }
+        }
+
+        // get bounds
+        let start = simpaccel(&slice, &decoded, &queryseq);
+        let ns = nextseq(queryseq);
+        let end = simpaccel(&slice, &decoded, &ns);
         hitrange = (start, end);
     }
     

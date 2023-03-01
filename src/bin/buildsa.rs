@@ -25,9 +25,6 @@ where P: AsRef<Path>, {
     Ok(io::BufReader::new(file).lines())
 }
 
-// define type alias so this is less awful to look at
-//type Outfile = (Vec<(usize, Vec<char>)>, HashMap<String, (usize,usize)>, u32);
-
 // given input data, build suffix array, encode, and write to file
 fn buildsa(reference: &Path, output: String, k: u32) {
     // read in FASTA file, store as string (first entry, i.e. until '>'? until EOF?)
@@ -41,8 +38,12 @@ fn buildsa(reference: &Path, output: String, k: u32) {
         // Consumes the iterator, returns an (Optional) String
         for line in lines {
             if let Ok(ip) = line {
+                // skip empty line
+                if ip.is_empty(){
+                    continue;
+                }
                 // skip header
-                if ip.chars().nth(0).unwrap() == '>' {
+                else if ip.chars().nth(0).unwrap() == '>' {
                     continue;
                 }
                 else if refseq.is_empty() {
